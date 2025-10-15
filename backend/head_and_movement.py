@@ -1,123 +1,92 @@
 import cv2
+import numpy as np
 
-# amount of movement of head considered as no real gesture in each axis
-NO_MOVEMENT_HORIZONTAL, NO_MOVEMENT_VERTICAL = 5, 3
-# number of frames observed; set based on frame per second. Our machine is at 30 fps
-NUM_FRAMES = 0
-# original centroid of face with respect to image taken by camera
-ORIGINAL_I, ORIGINAL_J = None, None
-
-
-# responsible for recognizing the command given by the user
-def command(face_i, face_j, width, height, debug):
-
-    global ORIGINAL_J, ORIGINAL_I, NO_MOVEMENT_VERTICAL, NO_MOVEMENT_HORIZONTAL
-    # centroid of user's face
-    centroid_i, centroid_j = face_i + (width // 2), face_j + (height // 2)
-
-    if debug:
-        print(ORIGINAL_I, ORIGINAL_J)
-        print(centroid_i, centroid_j)
-
-    if centroid_i - ORIGINAL_I > NO_MOVEMENT_HORIZONTAL:
-        print('right')
-    elif ORIGINAL_I - centroid_i > NO_MOVEMENT_HORIZONTAL:
+def direction(ball_pos, left_box, right_box, upper_box, lower_box, frame_center):
+    x, y = ball_pos
+    if left_box[0] - 50 <= x <= left_box[0] + 50 and left_box[1] - 100 <= y <= left_box[1] + 100:
         print('left')
-    elif ORIGINAL_J - centroid_j + 5 > NO_MOVEMENT_VERTICAL:
+    elif right_box[0] - 50 <= x <= right_box[0] + 50 and right_box[1] - 100 <= y <= right_box[1] + 100:
+        print('right')
+    elif upper_box[0] - 50 <= x <= upper_box[0] + 50 and upper_box[1] - 100 <= y <= upper_box[1] + 100:
         print('up')
-    elif centroid_j - ORIGINAL_J > NO_MOVEMENT_VERTICAL:
+    elif lower_box[0] - 50 <= x <= lower_box[0] + 50 and lower_box[1] - 100 <= y <= lower_box[1] + 100:
         print('down')
+    elif frame_center[0] - 100 <= x <= frame_center[0] + 100 and frame_center[1] - 100 <= y <= frame_center[1] + 100:
+        print('waiting for decision')
     else:
         print('error')
 
-    return
-
-
-# for detecting the position of the user's face
-def face_detect(debug):
-
-    global NUM_FRAMES, ORIGINAL_I, ORIGINAL_J
-    # XML file for detecting face. Its a classifier trained to detect faces fast.
-    face_cascade = cv2.CascadeClassifier('lbpcascade_frontalface_improved.xml')
-    # starting video and capturing frames
+def movement_capture():
     cap = cv2.VideoCapture(0)
+
+    # --- HSV range for YELLOW ---
+    # Start with the tighter range; if lighting is tricky, try the broader one below
+    lower_yellow = np.array([15, 60, 60])     # lower hue, sat, val
+    upper_yellow = np.array([45, 255, 255])   # upper hue, sat, val
+    # Broader (optional):
+    # lower_yellow = np.array([15, 80, 80])
+    # upper_yellow = np.array([40, 255, 255])
 
     while True:
-        # read frames
-        ret, img = cap.read()
-        # converting to grayscale
-        gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
-        # detecting faces
-        face = face_cascade.detectMultiScale(
-            gray, scaleFactor=1.1, minNeighbors=5, minSize=(15, 15))
+        ret, frame = cap.read()
+        if not ret:
+            break
 
-        # face is a list, we only want to detect one face, so we should select the first value in face we get
-        # but when moving the face, the program may not detect any face at all; so we check if face detected or not
-        if len(face) > 0:
-            i, j, w, h = face[0]
-            cv2.rectangle(img, (i, j), (i + w, j + h), (255, 255, 0), 2)
+        h, w = frame.shape[:2]
+        center_x, center_y = w // 2, h // 2  # (x, y)
 
-            if NUM_FRAMES == 35:
-                command(i, j, w, h, debug= debug)
-            elif NUM_FRAMES == 60:
-                ORIGINAL_I, ORIGINAL_J = i + (w // 2), j + (h // 2)
-                print('give direction')
+        # guide boxes (draw with explicit color + thickness)
+        # right
+        cv2.rectangle(frame, (center_x + 100, center_y - 100),
+                             (center_x + 200, center_y + 100), (255, 255, 255), 2)
+        # left
+        cv2.rectangle(frame, (center_x - 200, center_y - 100),
+                             (center_x - 100, center_y + 100), (255, 255, 255), 2)
+        # up
+        cv2.rectangle(frame, (center_x - 50, center_y - 150),
+                             (center_x + 50, center_y - 100), (255, 255, 255), 2)
+        # down
+        cv2.rectangle(frame, (center_x - 50, center_y + 100),
+                             (center_x + 50, center_y + 150), (255, 255, 255), 2)
 
-            NUM_FRAMES = (NUM_FRAMES + 1) % 61
+        hsv = cv2.cvtColor(frame, cv2.COLOR_BGR2HSV)
+        mask = cv2.inRange(hsv, lower_yellow, upper_yellow)
 
-        # displaying the image
-        cv2.imshow('img', img)
-        # setting esc key for breaking out of the loop
-        k = cv2.waitKey(60) & 0xff
-        if k == 27:
+        # (optional) clean noise a bit
+        mask = cv2.morphologyEx(mask, cv2.MORPH_OPEN,
+                                cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (5, 5)))
+
+        contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+
+        for cnt in contours:
+            area = cv2.contourArea(cnt)
+            if area > 200:
+                (x, y), radius = cv2.minEnclosingCircle(cnt)
+                peri = cv2.arcLength(cnt, True)
+                if peri == 0:
+                    continue
+                circularity = 4 * np.pi * area / (peri ** 2)
+                if 0.7 < circularity < 1.2:
+                    center = (int(x), int(y))
+                    radius = int(radius)
+                    cv2.circle(frame, center, radius, (0, 0, 255), 2)
+                    direction(
+                        ball_pos=center,
+                        left_box=(center_x - 150, center_y),
+                        right_box=(center_x + 150, center_y),
+                        upper_box=(center_x, center_y - 125),
+                        lower_box=(center_x, center_y + 125),
+                        frame_center=(center_x, center_y)
+                    )
+
+        cv2.imshow("Yellow Ball Detection", frame)
+        # cv2.imshow("Mask", mask)  # helpful for debugging thresholds
+
+        if cv2.waitKey(1) & 0xFF == ord('q'):
             break
 
     cap.release()
-
     cv2.destroyAllWindows()
-    return
-
-
-# for defining the original position of the face of the user
-def face_position_set():
-
-    global ORIGINAL_I, ORIGINAL_J
-    # face detector
-    face_cascade = cv2.CascadeClassifier('lbpcascade_frontalface_improved.xml')
-    # starting video and capturing frames
-    cap = cv2.VideoCapture(0)
-    # face found or not
-    found = False
-
-    while not found:
-        # read frames
-        ret, img = cap.read()
-        # converting to grayscale
-        gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
-        # detecting faces
-        face = face_cascade.detectMultiScale(
-            gray, scaleFactor=1.1, minNeighbors=5, minSize=(15, 15))
-        # face is a list, we only want to detect one face, so we should select the first value in face we get
-        # but when moving the face, the program may not detect any face at all
-        if len(face) > 0:
-            found = True
-            ORIGINAL_I, ORIGINAL_J, w, h = face[0]
-            cv2.rectangle(img, (ORIGINAL_I, ORIGINAL_J),
-                          (ORIGINAL_I + w, ORIGINAL_J + h), (255, 255, 0), 2)
-            # setting the face centroids
-            ORIGINAL_I += (w // 2)
-            ORIGINAL_J += (h // 2)
-        # displaying the image
-        cv2.imshow('img', img)
-        # setting esc key for breaking out of the loop
-        k = cv2.waitKey(60) & 0xff
-        if k == 27:
-            break
-    cap.release()
-    cv2.destroyAllWindows()
-    return
-
 
 if __name__ == '__main__':
-    face_position_set()
-    face_detect(debug=False)
+    movement_capture()
