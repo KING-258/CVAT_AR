@@ -2,74 +2,84 @@ import cv2
 import numpy as np
 from flask import Flask, Response
 from flask_cors import CORS
-import pyautogui
+from evdev import UInput, ecodes as e
 
 app = Flask(__name__)
 CORS(app)
 
-# Determine direction using updated logic from head_and_movement.py (yellow marker, box layout)
-# Returns one of: 'left', 'right', 'up', 'down', 'waiting for decision', 'error'
-def get_direction(ball_pos, left_box, right_box, upper_box, lower_box, frame_center):
+# --------------------------------------------------------------------
+# Setup: create a virtual keyboard device
+# --------------------------------------------------------------------
+ui = UInput()
+
+def press_key(key):
+    """Simulate a keyboard key press using evdev."""
+    key_map = {
+        "left": e.KEY_LEFT,
+        "right": e.KEY_RIGHT,
+        "up": e.KEY_UP,
+        "down": e.KEY_DOWN
+    }
+
+    if key in key_map:
+        ui.write(e.EV_KEY, key_map[key], 1)   # Key down
+        ui.write(e.EV_KEY, key_map[key], 0)   # Key up
+        ui.syn()
+# --------------------------------------------------------------------
+
+
+# Determine direction from marker position and trigger key events
+def apply_direction(ball_pos, left_box, right_box, upper_box, lower_box, frame_center):
     x, y = ball_pos
     if left_box[0] - 50 <= x <= left_box[0] + 50 and left_box[1] - 100 <= y <= left_box[1] + 100:
-        return 'left'
+        print("Left\n")
+        press_key('left')
     elif right_box[0] - 50 <= x <= right_box[0] + 50 and right_box[1] - 100 <= y <= right_box[1] + 100:
-        return 'right'
+        print("Right\n")
+        press_key('right')
     elif upper_box[0] - 50 <= x <= upper_box[0] + 50 and upper_box[1] - 100 <= y <= upper_box[1] + 100:
-        return 'up'
+        print("UP\n")
+        press_key('up')
     elif lower_box[0] - 50 <= x <= lower_box[0] + 50 and lower_box[1] - 100 <= y <= lower_box[1] + 100:
-        return 'down'
-    elif frame_center[0] - 100 <= x <= frame_center[0] + 100 and frame_center[1] - 100 <= y <= frame_center[1] + 100:
-        return 'waiting for decision'
-    else:
-        return 'error'
+        print("Down\n")
+        press_key('down')
+    # Otherwise: do nothing
 
 
-# Detect the yellow marker and trigger direction detection
-# Stream frames as MJPEG for the frontend
+# Detect yellow marker, trigger key events, and stream frames
 def movement_capture():
-
     cap = cv2.VideoCapture(0)
 
-    # HSV range for yellow marker
-    lower_yellow = np.array([15, 60, 60])
-    upper_yellow = np.array([45, 255, 255])
+    lower_yellow = np.array([168, 151, 48])
+    upper_yellow = np.array([179, 251, 148])
 
     while True:
-
         ret, frame = cap.read()
         if not ret:
             break
 
         h, w = frame.shape[:2]
-        center_x, center_y = w // 2, h // 2  # (x, y)
+        center_x, center_y = w // 2, h // 2
 
-        # Guide boxes (white, thickness 2)
-        # right box
+        # Draw guide boxes
         cv2.rectangle(frame, (center_x + 100, center_y - 100),
                              (center_x + 200, center_y + 100), (255, 255, 255), 2)
-        # left box
         cv2.rectangle(frame, (center_x - 200, center_y - 100),
                              (center_x - 100, center_y + 100), (255, 255, 255), 2)
-        # up box
         cv2.rectangle(frame, (center_x - 50, center_y - 150),
                              (center_x + 50, center_y - 100), (255, 255, 255), 2)
-        # down box
         cv2.rectangle(frame, (center_x - 50, center_y + 100),
                              (center_x + 50, center_y + 150), (255, 255, 255), 2)
 
-        # HSV-based thresholding for yellow
+        # HSV mask for yellow
         hsv = cv2.cvtColor(frame, cv2.COLOR_BGR2HSV)
         mask = cv2.inRange(hsv, lower_yellow, upper_yellow)
-        # Clean small noise
         mask = cv2.morphologyEx(
-            mask,
-            cv2.MORPH_OPEN,
+            mask, cv2.MORPH_OPEN,
             cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (5, 5))
         )
 
         contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-
         for cnt in contours:
             area = cv2.contourArea(cnt)
             if area > 200:
@@ -81,7 +91,7 @@ def movement_capture():
                 if 0.7 < circularity < 1.2:
                     center = (int(x), int(y))
                     cv2.circle(frame, center, int(radius), (0, 0, 255), 2)
-                    dir_str = get_direction(
+                    apply_direction(
                         ball_pos=center,
                         left_box=(center_x - 150, center_y),
                         right_box=(center_x + 150, center_y),
@@ -89,26 +99,19 @@ def movement_capture():
                         lower_box=(center_x, center_y + 125),
                         frame_center=(center_x, center_y)
                     )
-                    # Log direction before triggering pyautogui
-                    if dir_str in {"left", "right", "up", "down"}:
-                        print(f"Direction: {dir_str}")
-                        pyautogui.press(dir_str)
-                    elif dir_str != 'waiting for decision':
-                        # avoid spamming logs for idle state
-                        print(dir_str)
 
         ret, buffer = cv2.imencode('.jpg', frame)
         frame_bytes = buffer.tobytes()
         yield (b'--frame\r\n'
                b'Content-Type: image/jpeg\r\n\r\n' + frame_bytes + b'\r\n')
 
-        # Press 'q' to quit (useful when running standalone)
         if cv2.waitKey(1) & 0xFF == ord('q'):
             break
 
     cap.release()
     cv2.destroyAllWindows()
-    return
+    ui.close()
+
 
 @app.route('/video_feed')
 def video_feed():
